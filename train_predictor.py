@@ -22,17 +22,17 @@ class MLP(pl.LightningModule):
         self.ycol = ycol
         self.layers = nn.Sequential(
             nn.Linear(self.input_size, 1024),
-            nn.ReLU(),
+            #nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(1024, 128),
-            nn.ReLU(),
+            #nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(128, 64),
-            nn.ReLU(),
+            #nn.ReLU(),
             nn.Dropout(0.1),
 
             nn.Linear(64, 16),
-            nn.ReLU(),
+            #nn.ReLU(),
 
             nn.Linear(16, 1)
         )
