@@ -1,4 +1,4 @@
-# CLIP+MPL Aesthetic Score Predictor
+# CLIP+MLP Aesthetic Score Predictor
 
 Train, use and visualize an aesthetic score predictor ( how much people like on average an image ) based on a simple neural net that takes CLIP embeddings as inputs.
 
