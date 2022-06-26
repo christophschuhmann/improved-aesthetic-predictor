@@ -8,7 +8,7 @@ import json
 from warnings import filterwarnings
 
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"    # choose GPU if you are on a multi GPU server
 import numpy as np
 import torch
 import pytorch_lightning as pl
@@ -23,10 +23,12 @@ from torch.utils.data import Dataset, DataLoader
 import json
 
 import clip
-import open_clip
+#import open_clip
 
 from PIL import Image, ImageFile
 
+
+# if you changed the MLP architecture during training, change it also here:
 
 class MLP(pl.LightningModule):
     def __init__(self, input_size, xcol='emb', ycol='avg_rating'):
@@ -80,9 +82,10 @@ def normalized(a, axis=-1, order=2):
     return a / np.expand_dims(l2, axis)
 
 
-model = MLP(768)
+model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
 
-s = torch.load("/mnt/spirit/ava+logos-l14-reluMSE.pth")
+s = torch.load("/mnt/spirit/ava+logos-l14-reluMSE.pth")   # load the model you trained previously or the model available in this repo
+
 model.load_state_dict(s)
 
 
@@ -94,26 +97,21 @@ model.eval()
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model2, preprocess = clip.load("ViT-L/14", device=device)  #RN50x64   ViT-L/14 
+model2, preprocess = clip.load("ViT-L/14", device=device)  #RN50x64   
 
 
-#model3, preprocess2 = clip.load("RN50x64", device=device)  #RN50x64   ViT-L/14
 
-
-#device = "cuda" if torch.cuda.is_available() else "cpu"
-#print(open_clip.list_pretrained())
-#model3, _, preprocess2 = open_clip.create_model_and_transforms('ViT-L-14', pretrained='laion400m_e32') #open_clip.create_model_and_transforms('ViT-L-14', pretrained='laion400m_e32')  
-
-#model3.to(device)
-
-
-#img= "/mnt/spirit/image.jpg"
 c=0
 urls= []
 predictions=[]
 
+# this will run inference over 10 webdataset tar files from LAION 400M and sort them into 20 categories
+# you can DL LAION 400M and convert it to wds tar files with img2dataset ( https://github.com/rom1504/img2dataset ) 
+
+
 for j in range(10):
    if j<10:
+     # change the path to the tar files accordingly
      dataset = wds.WebDataset("pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/0000"+str(j)+".tar -")  #"pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/00625.tar -")
    else:
      dataset = wds.WebDataset("pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/000"+str(j)+".tar -")  #"pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/00625.tar -")
@@ -121,42 +119,26 @@ for j in range(10):
 
    for i, d in enumerate(dataset):
       print(c)
-      #print(d['json'])  
-      metadata= json.loads(d['json'])       
-      #print(type(metadata))
-      #print(metadata["url"])                 
 
+      metadata= json.loads(d['json'])       
 
       pil_image = Image.open(io.BytesIO(d['jpg']))
-
-
       c=c+1
       try:
          image = preprocess(pil_image).unsqueeze(0).to(device)
-         #image2 = preprocess2(pil_image).unsqueeze(0).to(device)
+
       except:
          continue
 
       with torch.no_grad():
          image_features = model2.encode_image(image)
-         #image_features2 = model3.encode_image(image2)
-         #text_features = model.encode_text(text)
-    
-       #print (type(image_features.cpu().detach().numpy() ))
+
 
       im_emb_arr = normalized(image_features.cpu().detach().numpy() )
-      #im_emb_arr2 = normalized(image_features2.cpu().detach().numpy() )
-      #print(im_emb_arr.shape)
-      #print(torch.from_numpy(im_emb_arr).size())
-      #output = model(torch.zeros([3, 1024]))
-      #im_emb_arr = np.hstack( (im_emb_arr,im_emb_arr2) )
+
       prediction = model(torch.from_numpy(im_emb_arr).to(device).type(torch.cuda.FloatTensor))
-      #print(prediction)
       urls.append(metadata["url"])
       predictions.append(prediction)
-      #im = pil_image.convert('RGB')
-      #im = im.save("/opt/avaoutputlaion-oai-l14/"+str(prediction[0][0].item())+".jpg" ,quality=80)
-      #print("/opt/avaoutputlaion-oai-l14/"+str(prediction[0][0].item())+".jpg")
 
 
 df = pd.DataFrame(list(zip(urls, predictions)),
@@ -178,11 +160,11 @@ for [a,b] in buckets:
     count_part = len(total_part) / len(df) * 100
     estimated =int ( len(total_part) )
     part = total_part[:50]
-    #print("test1")
+
     html+=f"<h2>In bucket {a} - {b} there is {count_part:.2f}% samples:{estimated:.2f} </h2> <div>"
     for filepath in part["filepath"]:
         html+='<img src="'+filepath +'" height="200" />'
-    #print("test2")
+
 
     html+="</div>"
     i+=1
