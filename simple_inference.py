@@ -91,7 +91,7 @@ def normalized(a, axis=-1, order=2):
 
 model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
 
-s = torch.load("ava+logos-l14-reluMSE.pth")   # load the model you trained previously or the model available in this repo
+s = torch.load("ava+logos-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
 
 model.load_state_dict(s)
 
