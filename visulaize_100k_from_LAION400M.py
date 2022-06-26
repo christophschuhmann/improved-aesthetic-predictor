@@ -38,17 +38,17 @@ class MLP(pl.LightningModule):
         self.ycol = ycol
         self.layers = nn.Sequential(
             nn.Linear(self.input_size, 1024),
-            nn.ReLU(),
+            #nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(1024, 128),
-            nn.ReLU(),
+            #nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(128, 64),
-            nn.ReLU(),
+            #nn.ReLU(),
             nn.Dropout(0.1),
 
             nn.Linear(64, 16),
-            nn.ReLU(),
+            #nn.ReLU(),
 
             nn.Linear(16, 1)
         )
@@ -84,7 +84,7 @@ def normalized(a, axis=-1, order=2):
 
 model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
 
-s = torch.load("/mnt/spirit/ava+logos-l14-reluMSE.pth")   # load the model you trained previously or the model available in this repo
+s = torch.load("ava+logos-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
 
 model.load_state_dict(s)
 
@@ -169,7 +169,7 @@ for [a,b] in buckets:
     html+="</div>"
     i+=1
     print(i)
-with open("./aesthetic_viz_laion_ava+logos_L14_100k-reluMSE.html", "w") as f:
+with open("./aesthetic_viz_laion_ava+logos_L14_100k-linearMSE.html", "w") as f:
     f.write(html)
     
 
