@@ -107,7 +107,7 @@ epochs = 50
 
 model.train()
 best_loss =999
-save_name = "predictor_L14_MSE.pth"
+save_name = "linear_predictor_L14_MSE.pth"
 
 
 for epoch in range(epochs):
