@@ -1,5 +1,10 @@
 # CLIP+MLP Aesthetic Score Predictor
 
+<p>
+<a href="https://console.tiyaro.ai/explore?q=CompVis/stable-diffusion-v1-4&pub=CompVis"> <img src="https://tiyaro-public-docs.s3.us-west-2.amazonaws.com/assets/try_on_tiyaro_badge.svg"></a>
+</p>
+
+
 Train, use and visualize an aesthetic score predictor ( how much people like on average an image ) based on a simple neural net that takes CLIP embeddings as inputs.
 
 
