@@ -4,8 +4,9 @@ import io
 import matplotlib.pyplot as plt
 import os
 import json
+import shutil
+import pyfastcopy
 from warnings import filterwarnings
-
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"    # choose GPU if you are on a multi GPU server
 import numpy as np
@@ -198,6 +199,9 @@ def do_images_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_
             logging.info(f"resized: {img_path} by {current_thread}")
     return True
 
+def prepdir(f):
+    dname=os.path.dirname(f)
+    os.makedirs(dname, exist_ok=True)
 
 def run_images_mp(args, files, preprocess_fn, rank_fn):
     tasks_to_accomplish = mq.Queue()
@@ -229,7 +233,11 @@ def run_images_mp(args, files, preprocess_fn, rank_fn):
         else:
             img_path,img = task
             rank = rank_fn(img_path,img)
-            logging.warning(f"predicted: {img_path} {rank}   image_process: [{''.join([str(x.value) for x in states])}] ")
+            try:
+                qsize = f" qsize: {tasks_that_are_done.qsize()}"
+            except:
+                qsize = f""
+            logging.warning(f"predicted: {img_path} {rank}   image_process: [{''.join([str(x.value) for x in states])}] files: {file_cnt} done: {done}{qsize}")
             yield img_path, rank
             done+=1
     for k in kills:
@@ -285,18 +293,30 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
             container = av.open(f)
             video = next(s for s in container.streams)
             rank = 0.
+            next_file = False
             for packet in container.demux(video):
+                if next_file: break
                 for frame in packet.decode():
                     status.value=frame.index
                     if kill.value==1: return True
+                    if args.v_output:
+                        outfname = prep_fname(f,args.v_output,frame.index)
+                    if args.v_maxframes>0 and frame.index>args.v_maxframes:
+                        next_file=True
+                        break
                     if should_process(frame.index,rank):
-                        img=frame.to_image()
                         img_path="%s:%d"%(f,frame.index)
+                        if os.path.exists(outfname):
+                            rank = args.cutoff+0.1
+                            logging.warning(f"skipped: {current_thread} : {img_path} as {outfname} already exists!")
+                            continue
+                            
+                        img=frame.to_image()
                         rank = rank_fn(img_path,img)
                         logging.warning(f"predicted: {current_thread} : {img_path} {rank}")
-                        if rank>args.v_cutoff:
+                        if rank>args.cutoff:
                             if args.v_output:
-                                outfname = prep_fname(f,args.v_output,frame.index)
+                                prepdir(outfname)
                                 logging.warning(f"saving {current_thread} : writing to: {outfname} from {img_path}")
                                 img.save(outfname,quality=90)
                                 tasks_that_are_done.put((outfname,rank))
@@ -333,13 +353,14 @@ def run_video_mp(args, files, preprocess_fn, rank_fn):
             task = tasks_that_are_done.get(block=True,timeout=1)
         except queue.Empty:
             logging.debug("EMPTY!!")
-            logging.warning(f"video_process: [{process_string()}]")
+            logging.warning(f"video_process: [{process_string()}] files: {file_cnt} done: {done}")
             continue
         else:
-            logging.warning(f"video_process: [{process_string()}]")
             if task[0]=="DONE":
                 done+=1
+                logging.warning(f"video_process: [{process_string()}] files: {file_cnt} done: {done}")
             else:
+                logging.warning(f"video_process: [{process_string()}] files: {file_cnt} done: {done}")
                 yield task
     for k in kills:
         k.value=1
@@ -351,19 +372,27 @@ def main() -> int:
     parser.add_argument("--log_level", default=logging.INFO, type=lambda x: getattr(logging, x), help=f"Configure the logging level: {list(logging._nameToLevel.keys())}")
     parser.add_argument('--maxw', default=1920, type=int, help="Max width in pixels")
     parser.add_argument('--parallel', default=1, type=int, help="how many image decoding to run in parallel")
-    parser.add_argument('--imagelist', action='store', help="file with one line per entry of images to process")
+    parser.add_argument('--list', action='store', help="file with one line per entry of images to process")
+    parser.add_argument('--cutoff', type=float, default=5.3, help="action of rank is above this")
+    parser.add_argument('--i_output', default="", help="image: where to store the output. %%f - input filename. %%F - path-excluded filename")
     parser.add_argument('--video', action='store_true', default=False, help="whether to use video")
     parser.add_argument('--v_when', default="mod:1", help="video : rank not every frame. mod:1 - every frame, mod:5 - every 5th frame, adaptive_mod:30:5.0 - every 30th frame or if prev fame rank is >= 5.0. ")
-    parser.add_argument('--v_cutoff', type=float, default=5.3, help="video : action of rank is above this")
+    parser.add_argument('--v_maxframes', type=int, default=0, help="video : max number of frames to process - 0 is all")
     parser.add_argument('--v_output', default="", help="video : where to store the output. %%f - extensionless input filename. %%F - path-excluded extensioneless filename. %%d - with 6-digit frame seq")
     parser.add_argument('rest', nargs=argparse.REMAINDER, help="parallel to process")
     args = parser.parse_args()
-    logging.basicConfig(level=args.log_level, format='%(asctime)s %(message)s')
+    logging.basicConfig(level=args.log_level, format='%(asctime)s:%(lineno)d %(message)s')
 
     preprocess_fn,rank_fn = load_model()
+    def prep_fname(f,expr):
+        extless=f
+        expr=expr.replace(r'%F',os.path.basename(extless))
+        expr=expr.replace(r'%D',os.path.dirname(extless))
+        expr=expr.replace(r'%f',extless)
+        return expr
     def make_file_list():
-        if args.imagelist:
-            with open(args.imagelist) as file:
+        if args.list:
+            with open(args.list) as file:
                 for line in file:
                     yield(line.rstrip())
         for k in args.rest:
@@ -378,6 +407,23 @@ def main() -> int:
         gen=run_images_mp(args,flist,preprocess_fn,rank_fn)
     for path,rank in gen:
         print (path,"%2.4f"%rank)
+        if args.i_output:
+            outfname = prep_fname(path,args.i_output)
+            if not os.path.exists(outfname):
+                if rank>args.cutoff:
+                    prepdir(outfname)
+                    if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
+                        os.system(f'cp "{path}" "{outfname}"')
+                    else:
+                        try:
+                            shutil.copy2(path,outfname)
+                        except:
+                            pass
+                    logging.warning(f"saving : writing to: {outfname} from {path}")
+            else:
+                logging.warning(f"skipping : already exists {outfname} from {path}")
+
+
     return 0
 
 if __name__ == '__main__':
