@@ -32,10 +32,13 @@ import argparse
 #if switching to mutlitprocess swithc both
 import multiprocessing as mp
 import multiprocessing as mq
+import threading
 
 import time
 import queue
-    
+
+import av
+
 # if you changed the MLP architecture during training, change it also here:
 class MLP(pl.LightningModule):
     def __init__(self, input_size, xcol='emb', ycol='avg_rating'):
@@ -175,7 +178,7 @@ def load_model():
         return prediction[0,0].item()
     return resize,rank
 
-def do_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, current_thread, status, kill):
+def do_images_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, current_thread, status, kill):
     while True:
         status.value=0
         if kill.value==1: 
@@ -196,7 +199,7 @@ def do_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, arg
     return True
 
 
-def run_mp(args, files, preprocess_fn, rank_fn):
+def run_images_mp(args, files, preprocess_fn, rank_fn):
     tasks_to_accomplish = mq.Queue()
     tasks_that_are_done = mq.Queue()
     processes = []
@@ -212,7 +215,7 @@ def run_mp(args, files, preprocess_fn, rank_fn):
         ct+=1
         states.append(mp.Manager().Value('i',0))
         kills.append(mp.Manager().Value('i',0))
-        p = mp.Process(target=do_job, args=(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, ct, states[ct-1], kills[ct-1]))
+        p = mp.Process(target=do_images_job, args=(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, ct, states[ct-1], kills[ct-1]))
         processes.append(p)
         p.start()
     done = 0
@@ -235,7 +238,7 @@ def run_mp(args, files, preprocess_fn, rank_fn):
         p.join()
     
 
-def run_one(args, files, preprocess_fn, rank_fn):
+def run_images_one(args, files, preprocess_fn, rank_fn):
     for f in files:
         img_path = f
         img = preprocess_fn(img_path,args.maxw)
@@ -243,6 +246,105 @@ def run_one(args, files, preprocess_fn, rank_fn):
         logging.warning(f"predicted: {img_path} {rank}")
         yield img_path, rank
 
+def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, current_thread, status, kill):
+    def prep_fname(f,expr,framenum):
+        extless=os.path.splitext(f)[0]
+        expr=expr.replace(r'%F',os.path.basename(extless))
+        expr=expr.replace(r'%D',os.path.dirname(extless))
+        expr=expr.replace(r'%f',extless)
+        expr=expr.replace(r'%d','%06d'%framenum)
+        return expr
+    when = args.v_when
+    if when.startswith("mod:"):
+        every_frame = int(when.split(":")[1])
+        logging.warning(f"configure to mod: {every_frame}")
+        def should_process(frame, last_rank):
+            return frame % every_frame == 0
+    elif when.startswith("adaptive_mod:"):
+        splt = when.split(":")
+        every_frame = int(splt[1])
+        adaptive_score = float(splt[2])
+        logging.warning(f"configure to adaptive mod: {every_frame} cutoff : {adaptive_score}")
+        def should_process(frame, last_rank):
+            return frame % every_frame == 0 or last_rank>=adaptive_score
+
+    while True:
+        status.value=0
+        if kill.value==1: return True
+        try:
+            task = tasks_to_accomplish.get(block=True,timeout=1)
+        except queue.Empty:
+            status.value=-1
+            continue
+        else:
+            status.value=-2
+            f=task
+            if not f: 
+                tasks_that_are_done.put(("DONE",0))
+                continue
+            container = av.open(f)
+            video = next(s for s in container.streams)
+            rank = 0.
+            for packet in container.demux(video):
+                for frame in packet.decode():
+                    status.value=frame.index
+                    if kill.value==1: return True
+                    if should_process(frame.index,rank):
+                        img=frame.to_image()
+                        img_path="%s:%d"%(f,frame.index)
+                        rank = rank_fn(img_path,img)
+                        logging.warning(f"predicted: {current_thread} : {img_path} {rank}")
+                        if rank>args.v_cutoff:
+                            if args.v_output:
+                                outfname = prep_fname(f,args.v_output,frame.index)
+                                logging.warning(f"saving {current_thread} : writing to: {outfname} from {img_path}")
+                                img.save(outfname,quality=90)
+                                tasks_that_are_done.put((outfname,rank))
+                            else:
+                                tasks_that_are_done.put((img_path,rank))
+
+            tasks_that_are_done.put(("DONE",0))
+    return True
+
+def run_video_mp(args, files, preprocess_fn, rank_fn):
+    tasks_to_accomplish = queue.Queue()
+    tasks_that_are_done = queue.Queue()
+    processes = []
+    number_of_processes = args.parallel
+    file_cnt=0
+    for f in files:
+        tasks_to_accomplish.put(f)
+        file_cnt+=1
+    ct = 0
+    states=[]
+    kills=[]
+    for w in range(number_of_processes):
+        ct+=1
+        states.append(mp.Manager().Value('i',0))
+        kills.append(mp.Manager().Value('i',0))
+        p = threading.Thread(target=do_video_job, args=(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, ct, states[ct-1], kills[ct-1]))
+        processes.append(p)
+        p.start()
+    done = 0
+    while done<file_cnt:
+        def process_string():
+            return ",".join([str(x.value) for x in states])
+        try:
+            task = tasks_that_are_done.get(block=True,timeout=1)
+        except queue.Empty:
+            logging.debug("EMPTY!!")
+            logging.warning(f"video_process: [{process_string()}]")
+            continue
+        else:
+            logging.warning(f"video_process: [{process_string()}]")
+            if task[0]=="DONE":
+                done+=1
+            else:
+                yield task
+    for k in kills:
+        k.value=1
+    for p in processes:
+        p.join()
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -250,6 +352,10 @@ def main() -> int:
     parser.add_argument('--maxw', default=1920, type=int, help="Max width in pixels")
     parser.add_argument('--parallel', default=1, type=int, help="how many image decoding to run in parallel")
     parser.add_argument('--imagelist', action='store', help="file with one line per entry of images to process")
+    parser.add_argument('--video', action='store_true', default=False, help="whether to use video")
+    parser.add_argument('--v_when', default="mod:1", help="video : rank not every frame. mod:1 - every frame, mod:5 - every 5th frame, adaptive_mod:30:5.0 - every 30th frame or if prev fame rank is >= 5.0. ")
+    parser.add_argument('--v_cutoff', type=float, default=5.3, help="video : action of rank is above this")
+    parser.add_argument('--v_output', default="", help="video : where to store the output. %%f - extensionless input filename. %%F - path-excluded extensioneless filename. %%d - with 6-digit frame seq")
     parser.add_argument('rest', nargs=argparse.REMAINDER, help="parallel to process")
     args = parser.parse_args()
     logging.basicConfig(level=args.log_level, format='%(asctime)s %(message)s')
@@ -264,14 +370,14 @@ def main() -> int:
             yield k
 
     flist = make_file_list()
-    if args.parallel==1:
-        gen=run_one(args,flist,preprocess_fn,rank_fn)
+    if args.video:
+        gen=run_video_mp(args,flist,preprocess_fn,rank_fn)
+    elif args.parallel==1:
+        gen=run_images_one(args,flist,preprocess_fn,rank_fn)
     else:
-        gen=run_mp(args,flist,preprocess_fn,rank_fn)
+        gen=run_images_mp(args,flist,preprocess_fn,rank_fn)
     for path,rank in gen:
         print (path,"%2.4f"%rank)
-
-
     return 0
 
 if __name__ == '__main__':
