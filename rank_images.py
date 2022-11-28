@@ -291,6 +291,7 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                 tasks_that_are_done.put(("DONE",0))
                 continue
             container = av.open(f)
+            logging.warning(f"opened video: {current_thread} : {f}")
             video = next(s for s in container.streams)
             rank = 0.
             next_file = False
@@ -310,7 +311,7 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                             rank = args.cutoff+0.1
                             logging.warning(f"skipped: {current_thread} : {img_path} as {outfname} already exists!")
                             continue
-                            
+
                         img=frame.to_image()
                         rank = rank_fn(img_path,img)
                         logging.warning(f"predicted: {current_thread} : {img_path} {rank}")
