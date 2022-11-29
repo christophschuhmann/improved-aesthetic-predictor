@@ -106,23 +106,24 @@ def timeit(f):
 
     return timed
 
-def load_model():
+def load_model(device):
+    #device = "cuda" if torch.cuda.is_available() else "cpu"
     model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
 
     @timeit
     def load_mdl(): 
-        return torch.load("sac+logos+ava1-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
+        return torch.load("sac+logos+ava1-l14-linearMSE.pth",map_location=torch.device(device))   # load the model you trained previously or the model available in this repo
     s=load_mdl()
+
 
     @timeit
     def load_state(s): 
         model.load_state_dict(s)
-        model.to("cuda")
+        model.to(device)
         model.eval()
     load_state(s)
 
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     
     @timeit
     def load_to_device():
@@ -174,7 +175,7 @@ def load_model():
         @timeit
         def run_prediction():
             im_emb_arr = normalized(image_features.cpu().detach().numpy() )
-            return model(torch.from_numpy(im_emb_arr).to(device).type(torch.cuda.FloatTensor))
+            return model(torch.from_numpy(im_emb_arr).to(device).type(torch.float32))
         prediction = run_prediction()
         logging.debug(f"Aesthetic score predicted by the model for {img_path} : {prediction}")
         return prediction[0,0].item()
@@ -286,45 +287,52 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
             if not f: 
                 tasks_that_are_done.put(("DONE","Skipped"))
                 continue
-            try:
-                container = av.open(f)
-                logging.warning(f"opened video: thread: {current_thread} : {f}")
-                video = next(s for s in container.streams)
-                rank = 0.
-                next_file = False
-                for packet in container.demux(video):
-                    if next_file: break
-                    for frame in packet.decode():
-                        status.value=frame.index
-                        if kill.value==1: return True
-                        if args.v_output:
-                            outfname = prep_fname(f,args.v_output,frame.index)
-                        if args.v_maxframes>0 and frame.index>args.v_maxframes:
-                            next_file=True
-                            break
-                        if should_process(frame.index,rank):
-                            img_path="%s:%d"%(f,frame.index)
-                            if os.path.exists(outfname):
-                                rank = args.cutoff+0.1
-                                logging.warning(f"skipped: {current_thread} : {img_path} as {outfname} already exists!")
-                                continue
+            left_retries = args.retry+1
+            while (not kill.value==1) and (left_retries>0):
+                try:
+                    left_retries-=1
+                    container = av.open(f)
+                    logging.warning(f"opened video: thread: {current_thread} : {f}")
+                    video = next(s for s in container.streams)
+                    rank = 0.
+                    next_file = False
+                    for packet in container.demux(video):
+                        if next_file: break
+                        for frame in packet.decode():
+                            status.value=frame.index
+                            if kill.value==1: return True
+                            if args.v_output:
+                                outfname = prep_fname(f,args.v_output,frame.index)
+                            if args.v_maxframes>0 and frame.index>args.v_maxframes:
+                                next_file=True
+                                break
+                            if should_process(frame.index,rank):
+                                img_path="%s:%d"%(f,frame.index)
+                                if os.path.exists(outfname):
+                                    rank = args.cutoff+0.1
+                                    logging.warning(f"skipped: {current_thread} : {img_path} as {outfname} already exists!")
+                                    continue
 
-                            img=frame.to_image()
-                            rank = rank_fn(img_path,img)
-                            logging.warning(f"predicted: {current_thread} : {img_path} {rank}")
-                            if rank>args.cutoff:
-                                if args.v_output:
-                                    prepdir(outfname)
-                                    logging.warning(f"saving {current_thread} : writing to: {outfname} from {img_path}")
-                                    img.save(outfname,quality=90)
-                                    tasks_that_are_done.put(("SAVED",(outfname,rank)))
-                                else:
-                                    tasks_that_are_done.put(("SKIPPED",(img_path,rank)))
-            except Exception:
-                logging.error(f"Processing {f} on {current_thread} failed due to exception: {traceback.format_exc()}")
-                tasks_that_are_done.put(("DONE",f"Exception for {f}"))
-            else:
-                tasks_that_are_done.put(("DONE",f"Succeeded for {f}"))
+                                img=frame.to_image()
+                                rank = rank_fn(img_path,img)
+                                logging.warning(f"predicted: {current_thread} : {img_path} {rank}")
+                                if rank>args.cutoff:
+                                    if args.v_output:
+                                        prepdir(outfname)
+                                        logging.warning(f"saving {current_thread} : writing to: {outfname} from {img_path}")
+                                        img.save(outfname,quality=90)
+                                        tasks_that_are_done.put(("SAVED",(outfname,rank)))
+                                    else:
+                                        tasks_that_are_done.put(("SKIPPED",(img_path,rank)))
+                except Exception:
+                    logging.error(f"Processing {f} on {current_thread} failed due to exception: {traceback.format_exc()}")
+                    if left_retries>0:
+                        time.sleep(args.retry_sleep)
+                    else:
+                        tasks_that_are_done.put(("DONE",f"Exception for {f}"))
+                else:
+                    tasks_that_are_done.put(("DONE",f"Succeeded for {f}"))
+                    left_retries=0
     return True
 
 def run_video_mp(args, files, preprocess_fn, rank_fn):
@@ -378,13 +386,16 @@ def main() -> int:
     parser.add_argument('--i_output', default="", help="image: where to store the output. %%f - input filename. %%F - path-excluded filename")
     parser.add_argument('--video', action='store_true', default=False, help="whether to use video")
     parser.add_argument('--v_when', default="mod:1", help="video : rank not every frame. mod:1 - every frame, mod:5 - every 5th frame, adaptive_mod:30:5.0 - every 30th frame or if prev fame rank is >= 5.0. ")
+    parser.add_argument('--retry', type=int, default=0, help="How many times to try ")
+    parser.add_argument('--retry_sleep', type=int, default=5, help="How many seconds to sleep betwee retries")
     parser.add_argument('--v_maxframes', type=int, default=0, help="video : max number of frames to process - 0 is all")
     parser.add_argument('--v_output', default="", help="video : where to store the output. %%f - extensionless input filename. %%F - path-excluded extensioneless filename. %%d - with 6-digit frame seq")
+    parser.add_argument('--device', default=("cuda" if torch.cuda.is_available() else "cpu"), help="what to use to run ML. [cuda, cpu]")
     parser.add_argument('rest', nargs=argparse.REMAINDER, help="parallel to process")
     args = parser.parse_args()
     logging.basicConfig(level=args.log_level, format='%(asctime)s:%(lineno)d %(message)s')
 
-    preprocess_fn,rank_fn = load_model()
+    preprocess_fn,rank_fn = load_model(args.device)
     def prep_fname(f,expr):
         extless=f
         expr=expr.replace(r'%F',os.path.basename(extless))
