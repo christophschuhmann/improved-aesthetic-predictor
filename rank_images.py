@@ -30,9 +30,9 @@ import sys
 import time
 import argparse
 
-#if switching to mutlitprocess swithc both
-import multiprocessing as mp
-import multiprocessing as mq
+#if switching to mutlitprocess switch both
+import threading as mp
+import queue as mq
 import threading
 
 import time
@@ -187,22 +187,25 @@ def prepdir(f):
 
 def do_images_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, current_thread, status, kill):
     while True:
-        status.value=0
-        if kill.value==1: 
+        status[current_thread]='i'
+        if kill[current_thread]==1: 
             break
         try:
             task = tasks_to_accomplish.get(block=True,timeout=1)
         except queue.Empty:
-            status.value=1
+            status[current_thread]=' '
             continue
         else:
-            status.value=2
+            status[current_thread]='p'
             img_path=task
             try:
                 img = preprocess_fn(img_path,args.maxw)
-                status.value=3
-                tasks_that_are_done.put(("RANKED",[img_path,img]))
-                status.value=4
+                status[current_thread]='q'
+                while tasks_that_are_done.qsize()>1000:
+                    logging.warning(f"Thread {current_thread} is waiting for tasks_that_are_done to be processed")
+                    status[current_thread]='w'
+                    time.sleep(1)
+                tasks_that_are_done.put(("PREPROCESSED",[img_path,img]))
                 logging.info(f"resized: {img_path} by {current_thread}")
             except Exception:
                 logging.error(f"Processing {img_path} on {current_thread} failed due to exception: {traceback.format_exc()}")
@@ -215,41 +218,41 @@ def run_images_mp(args, files, preprocess_fn, rank_fn):
     processes = []
     number_of_processes = args.parallel
     file_cnt=0
+    states=[0 for x in range(number_of_processes)]
+    kills=[0 for x in range(number_of_processes)]
+    for ct in range(number_of_processes):
+        p = mp.Thread(target=do_images_job, args=(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, ct, states, kills))
+        processes.append(p)
+        p.start()
     for f in files:
         tasks_to_accomplish.put(f)
         file_cnt+=1
-    ct = 0
-    states=[]
-    kills=[]
-    for w in range(number_of_processes):
-        ct+=1
-        states.append(mp.Manager().Value('i',0))
-        kills.append(mp.Manager().Value('i',0))
-        p = mp.Process(target=do_images_job, args=(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, ct, states[ct-1], kills[ct-1]))
-        processes.append(p)
-        p.start()
     done = 0
     while done<file_cnt:
         try:
             state,msg = tasks_that_are_done.get(block=True,timeout=1)
         except queue.Empty:
             logging.debug("EMPTY!!")
-            logging.info(f"Status: {[x.value for x in states]}")
+            logging.info(f"Status: {[x for x in states]}")
             continue
         else:
-            img_path,img = msg
-            rank = rank_fn(img_path,img)
-            try:
-                qsize = f" qsize: {tasks_that_are_done.qsize()}"
-            except:
-                qsize = f""
-            logging.warning(f"predicted: {img_path} {rank}   image_process: [{''.join([str(x.value) for x in states])}] files: {file_cnt} done: {done}{qsize}")
-            yield img_path, rank
+            if state=="PREPROCESSED":
+                img_path,img = msg
+                rank = rank_fn(img_path,img)
+                try:
+                    qsize = f" qsize: {tasks_that_are_done.qsize()}"
+                except:
+                    qsize = f""
+                logging.warning(f"predicted: {img_path} {rank}   image_process: [{''.join([str(x) for x in states])}] files: {file_cnt} done: {done}{qsize}")
+                yield img_path, rank
             done+=1
-    for k in kills:
-        k.value=1
+    
+    for i in range(len(kills)):
+        kills[i]=1
+    logging.warning(f"Waiting on threads to finish")
     for p in processes:
         p.join()
+    logging.warning(f"Finished main thread")
     
 
 def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, current_thread, status, kill):
@@ -275,20 +278,20 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
             return frame % every_frame == 0 or last_rank>=adaptive_score
 
     while True:
-        status.value=0
-        if kill.value==1: return True
+        status[current_thread]=0
+        if kill[current_thread]==1: return True
         try:
             f = tasks_to_accomplish.get(block=True,timeout=1)
         except queue.Empty:
-            status.value=-1
+            status[current_thread]=-1
             continue
         else:
-            status.value=-2
+            status[current_thread]=-2
             if not f: 
                 tasks_that_are_done.put(("DONE","Skipped"))
                 continue
             left_retries = args.retry+1
-            while (not kill.value==1) and (left_retries>0):
+            while (not kill[current_thread]==1) and (left_retries>0):
                 try:
                     left_retries-=1
                     container = av.open(f)
@@ -299,8 +302,8 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                     for packet in container.demux(video):
                         if next_file: break
                         for frame in packet.decode():
-                            status.value=frame.index
-                            if kill.value==1: return True
+                            status[current_thread]=frame.index
+                            if kill[current_thread]==1: return True
                             if args.v_output:
                                 outfname = prep_fname(f,args.v_output,frame.index)
                             if args.v_maxframes>0 and frame.index>args.v_maxframes:
@@ -308,7 +311,7 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                                 break
                             if should_process(frame.index,rank):
                                 img_path="%s:%d"%(f,frame.index)
-                                if os.path.exists(outfname):
+                                if os.path.exists(outfname) and not args.force:
                                     rank = args.cutoff+0.1
                                     logging.warning(f"skipped: {current_thread} : {img_path} as {outfname} already exists!")
                                     continue
@@ -344,20 +347,16 @@ def run_video_mp(args, files, preprocess_fn, rank_fn):
     for f in files:
         tasks_to_accomplish.put(f)
         file_cnt+=1
-    ct = 0
-    states=[]
-    kills=[]
-    for w in range(number_of_processes):
-        ct+=1
-        states.append(mp.Manager().Value('i',0))
-        kills.append(mp.Manager().Value('i',0))
-        t = threading.Thread(target=do_video_job, args=(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, ct, states[ct-1], kills[ct-1]))
+    states=[0 for x in range(number_of_processes)]
+    kills=[0 for x in range(number_of_processes)]
+    for ct in range(number_of_processes):
+        t = threading.Thread(target=do_video_job, args=(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_fn, args, ct, states, kills))
         threads.append(t)
         t.start()
     done = 0
     while done<file_cnt:
         def process_string():
-            return ",".join([str(x.value) for x in states])
+            return ",".join([str(x) for x in states])
         try:
             state,msg = tasks_that_are_done.get(block=True,timeout=1)
         except queue.Empty:
@@ -371,10 +370,13 @@ def run_video_mp(args, files, preprocess_fn, rank_fn):
             else:
                 logging.warning(f"video_process: [{process_string()}] files: {file_cnt} done: {done}")
                 yield msg
-    for k in kills:
-        k.value=1
-    for t in threads:
-        t.join()
+    for i in range(len(kills)):
+        kills[i]=1
+    logging.warning(f"Waiting on threads to finish")
+    for p in threads:
+        p.join()
+    logging.warning(f"Finished main thread")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -383,6 +385,7 @@ def main() -> int:
     parser.add_argument('--parallel', default=1, type=int, help="how many image decoding to run in parallel")
     parser.add_argument('--list', action='store', help="file with one line per entry of images to process")
     parser.add_argument('--cutoff', type=float, default=5.3, help="action of rank is above this")
+    parser.add_argument('--force', action="store_true", default=False, help="whether to force overwrite of existing files")
     parser.add_argument('--i_output', default="", help="image: where to store the output. %%f - input filename. %%F - path-excluded filename")
     parser.add_argument('--video', action='store_true', default=False, help="whether to use video")
     parser.add_argument('--v_when', default="mod:1", help="video : rank not every frame. mod:1 - every frame, mod:5 - every 5th frame, adaptive_mod:30:5.0 - every 30th frame or if prev fame rank is >= 5.0. ")
@@ -420,16 +423,19 @@ def main() -> int:
         print (path,"%2.4f"%rank)
         if args.i_output:
             outfname = prep_fname(path,args.i_output)
-            if not os.path.exists(outfname):
+            if not os.path.exists(outfname) or args.force:
                 if rank>args.cutoff:
                     prepdir(outfname)
                     if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
                         os.system(f'cp "{path}" "{outfname}"')
                     else:
-                        try:
-                            shutil.copy2(path,outfname)
-                        except:
-                            pass
+                            try:
+                                os.link(path,outfname)
+                            except:
+                                try:
+                                    shutil.copy2(path,outfname)
+                                except:
+                                    pass
                     logging.warning(f"saving : writing to: {outfname} from {path}")
             else:
                 logging.warning(f"skipping : already exists {outfname} from {path}")
