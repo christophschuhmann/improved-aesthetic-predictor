@@ -40,6 +40,7 @@ import queue
 
 import av
 import traceback
+from sortedcontainers import SortedDict
 
 # if you changed the MLP architecture during training, change it also here:
 class MLP(pl.LightningModule):
@@ -202,7 +203,7 @@ def do_images_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_
                 img = preprocess_fn(img_path,args.maxw)
                 status[current_thread]='q'
                 while tasks_that_are_done.qsize()>1000:
-                    logging.warning(f"Thread {current_thread} is waiting for tasks_that_are_done to be processed")
+                    logging.info(f"Thread {current_thread} is waiting for tasks_that_are_done to be processed : qsize: {tasks_that_are_done.qsize()}")
                     status[current_thread]='w'
                     time.sleep(1)
                 tasks_that_are_done.put(("PREPROCESSED",[img_path,img]))
@@ -276,7 +277,43 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
         logging.warning(f"configure to adaptive mod: {every_frame} cutoff : {adaptive_score}")
         def should_process(frame, last_rank):
             return frame % every_frame == 0 or last_rank>=adaptive_score
+    class Bucket:
+        def __init__(self,fn):
+            self.container=SortedDict()
+            self.window=args.v_window
+            self.maxgap=args.v_maxgap
+            self.windowframes=args.v_windowframes
+            self.fn=fn
+        def insert(self,newidx,rank,params):
+            
+            if self.window<=1:
+                self.fn(True,params)
+                return
+            
+            if len(self.container)==0:
+                self.container[newidx]=(rank,params)
+            else:
+                lastidx,_ = self.container.peekitem(index=-1)
+                if newidx-lastidx>self.maxgap:
+                    self.flush()
+                self.container[newidx]=(rank,params)
+                if len(self.container)>=self.window or ((self.container.peekitem(index=-1)[0])-(self.container.peekitem(index=0)[0])>self.windowframes) :
+                    self.flush()
+        def flush(self):
+            if len(self.container)==0: return
 
+            maxrank = max([v[0] for (k,v) in self.container.items()])
+            saved = 0
+            for frame,(rank,args) in self.container.items():
+                if maxrank==rank and saved==0:
+                    logging.warning(f"window {current_thread} : picked frame {frame} to save from {len(self.container)} frames in buffer. first:{self.container.peekitem(index=0)[0]} last:{self.container.peekitem(index=-1)[0]}")
+                    self.fn(True,*args)
+                    saved+=1
+                else:
+                    self.fn(False,*args)
+            self.container.clear()
+    
+    
     while True:
         status[current_thread]=0
         if kill[current_thread]==1: return True
@@ -299,6 +336,16 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                     video = next(s for s in container.streams)
                     rank = 0.
                     next_file = False
+                    def save_fn(should_save,rank,outfname,img_path,img):
+                        if should_save:
+                            prepdir(outfname)
+                            logging.warning(f"saving {current_thread} : writing to: {outfname} from {img_path}")
+                            img.save(outfname,quality=90)
+                            tasks_that_are_done.put(("SAVED",(outfname,rank)))
+                        else:
+                            tasks_that_are_done.put(("SKIPPED",(img_path,rank)))
+
+                    buckets = Bucket(save_fn)
                     for packet in container.demux(video):
                         if next_file: break
                         for frame in packet.decode():
@@ -311,7 +358,7 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                                 break
                             if should_process(frame.index,rank):
                                 img_path="%s:%d"%(f,frame.index)
-                                if os.path.exists(outfname) and not args.force:
+                                if args.v_output and os.path.exists(outfname) and not args.force:
                                     rank = args.cutoff+0.1
                                     logging.warning(f"skipped: {current_thread} : {img_path} as {outfname} already exists!")
                                     continue
@@ -321,12 +368,11 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                                 logging.warning(f"predicted: {current_thread} : {img_path} {rank}")
                                 if rank>args.cutoff:
                                     if args.v_output:
-                                        prepdir(outfname)
-                                        logging.warning(f"saving {current_thread} : writing to: {outfname} from {img_path}")
-                                        img.save(outfname,quality=90)
-                                        tasks_that_are_done.put(("SAVED",(outfname,rank)))
+                                        buckets.insert(frame.index,rank,(rank,outfname,img_path,img))
                                     else:
                                         tasks_that_are_done.put(("SKIPPED",(img_path,rank)))
+                                    ##
+                    buckets.flush()
                 except Exception:
                     logging.error(f"Processing {f} on {current_thread} failed due to exception: {traceback.format_exc()}")
                     if left_retries>0:
@@ -392,6 +438,9 @@ def main() -> int:
     parser.add_argument('--retry', type=int, default=0, help="How many times to try ")
     parser.add_argument('--retry_sleep', type=int, default=5, help="How many seconds to sleep betwee retries")
     parser.add_argument('--v_maxframes', type=int, default=0, help="video : max number of frames to process - 0 is all")
+    parser.add_argument('--v_window', type=int, default=100, help="video : how many images to rank before outputting best")
+    parser.add_argument('--v_maxgap', type=int, default=100, help="video : how big index-gap should be when ranking image window")
+    parser.add_argument('--v_windowframes', type=int, default=500, help="video : how big first-last index in window can be")
     parser.add_argument('--v_output', default="", help="video : where to store the output. %%f - extensionless input filename. %%F - path-excluded extensioneless filename. %%d - with 6-digit frame seq")
     parser.add_argument('--device', default=("cuda" if torch.cuda.is_available() else "cpu"), help="what to use to run ML. [cuda, cpu]")
     parser.add_argument('rest', nargs=argparse.REMAINDER, help="parallel to process")
