@@ -496,6 +496,8 @@ def main() -> int:
                             except:
                                 try:
                                     shutil.copy2(path,outfname)
+                                    stat = filedate.File(path).get()
+                                    filedate.File(outfname).set(created=stat["created"], modified=stat["modified"])
                                 except:
                                     pass
                     logging.warning(f"saving : writing to: {outfname} from {path}")
