@@ -41,6 +41,8 @@ import queue
 import av
 import traceback
 from sortedcontainers import SortedDict
+import datetime
+import filedate
 
 # if you changed the MLP architecture during training, change it also here:
 class MLP(pl.LightningModule):
@@ -332,6 +334,8 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                 try:
                     left_retries-=1
                     container = av.open(f)
+                    stat = filedate.File(f).get()
+
                     logging.warning(f"opened video: thread: {current_thread} : {f}")
                     video = next(s for s in container.streams)
                     rank = 0.
@@ -340,7 +344,11 @@ def do_video_job(tasks_to_accomplish, tasks_that_are_done, rank_fn, preprocess_f
                         if should_save:
                             prepdir(outfname)
                             logging.warning(f"saving {current_thread} : writing to: {outfname} from {img_path}")
-                            img.save(outfname,quality=90)
+                            EXIF = img.getexif()
+                            EXIF.update({36867:stat["created"].strftime("%Y:%m:%d %H:%M:%S")})
+                            #print("AAAAAAAA",EXIF)
+                            img.save(outfname,quality=90,exif=EXIF)
+                            filedate.File(outfname).set(created=stat["created"],modified=stat["modified"])
                             tasks_that_are_done.put(("SAVED",(outfname,rank)))
                         else:
                             tasks_that_are_done.put(("SKIPPED",(img_path,rank)))
@@ -400,11 +408,21 @@ def run_video_mp(args, files, preprocess_fn, rank_fn):
         threads.append(t)
         t.start()
     done = 0
+    def finish_all(reason):
+        for i in range(len(kills)):
+            kills[i]=1
+        logging.warning(f"Waiting on threads to finish")
+        for p in threads:
+            p.join()
+        logging.warning(f"{reason} main thread")
     while done<file_cnt:
         def process_string():
             return ",".join([str(x) for x in states])
         try:
             state,msg = tasks_that_are_done.get(block=True,timeout=1)
+        except KeyboardInterrupt:
+            finish_all("Interupted")
+            return
         except queue.Empty:
             logging.debug("EMPTY!!")
             logging.warning(f"video_process: [{process_string()}] files: {file_cnt} done: {done}")
@@ -416,12 +434,7 @@ def run_video_mp(args, files, preprocess_fn, rank_fn):
             else:
                 logging.warning(f"video_process: [{process_string()}] files: {file_cnt} done: {done}")
                 yield msg
-    for i in range(len(kills)):
-        kills[i]=1
-    logging.warning(f"Waiting on threads to finish")
-    for p in threads:
-        p.join()
-    logging.warning(f"Finished main thread")
+    finish_all("Finished")
 
 
 def main() -> int:
