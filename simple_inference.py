@@ -91,15 +91,16 @@ def normalized(a, axis=-1, order=2):
 
 model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
 
-s = torch.load("sac+logos+ava1-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+s = torch.load("sac+logos+ava1-l14-linearMSE.pth", map_location=torch.device(device))   # load the model you trained previously or the model available in this repo
 
 model.load_state_dict(s)
 
-model.to("cuda")
+model.to(device)
 model.eval()
 
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
 model2, preprocess = clip.load("ViT-L/14", device=device)  #RN50x64   
 
 
@@ -114,7 +115,8 @@ with torch.no_grad():
 
 im_emb_arr = normalized(image_features.cpu().detach().numpy() )
 
-prediction = model(torch.from_numpy(im_emb_arr).to(device).type(torch.cuda.FloatTensor))
+type = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
+prediction = model(torch.from_numpy(im_emb_arr).to(device).type(type))
 
 print( "Aesthetic score predicted by the model:")
 print( prediction )
