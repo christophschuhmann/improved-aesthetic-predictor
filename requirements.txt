@@ -1,0 +1,12 @@
+clip==0.2.0
+datasets==2.10.1
+matplotlib==3.7.1
+numpy==1.24.2
+openai_clip==1.0.1
+pandas==1.5.3
+Pillow==9.4.0
+pytorch_lightning==2.0.0
+torch==2.0.0
+torchvision==0.15.1
+tqdm==4.65.0
+webdataset==0.2.48
