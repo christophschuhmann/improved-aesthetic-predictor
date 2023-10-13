@@ -32,10 +32,6 @@ from PIL import Image, ImageFile
 
 img_path = "test.jpg"
 
-
-
-
-
 # if you changed the MLP architecture during training, change it also here:
 class MLP(pl.LightningModule):
     def __init__(self, input_size, xcol='emb', ycol='avg_rating'):
@@ -91,15 +87,16 @@ def normalized(a, axis=-1, order=2):
 
 model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
 
-s = torch.load("sac+logos+ava1-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# load the model you trained previously or the model available in this repo
+s = torch.load("sac+logos+ava1-l14-linearMSE.pth", map_location=device)
 
 model.load_state_dict(s)
 
-model.to("cuda")
+model.to(device)
 model.eval()
 
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
 model2, preprocess = clip.load("ViT-L/14", device=device)  #RN50x64   
 
 
@@ -114,9 +111,9 @@ with torch.no_grad():
 
 im_emb_arr = normalized(image_features.cpu().detach().numpy() )
 
-prediction = model(torch.from_numpy(im_emb_arr).to(device).type(torch.cuda.FloatTensor))
-
+if device == "cuda":
+    prediction = model(torch.from_numpy(im_emb_arr).to(device).type(torch.cuda.FloatTensor))
+else:
+    prediction = model(torch.from_numpy(im_emb_arr).to(device).type(torch.FloatTensor))
 print( "Aesthetic score predicted by the model:")
 print( prediction )
-
-
