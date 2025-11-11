@@ -2,6 +2,7 @@
 
 Train, use and visualize an aesthetic score predictor ( how much people like on average an image ) based on a simple neural net that takes CLIP embeddings as inputs.
 
+This model was trained using three datasets: Simulacra Aesthetic Captions ([SAC](https://github.com/JD-P/simulacra-aesthetic-captions)), Aesthetic Visual Analysis ([AVA](https://github.com/imfing/ava_downloader)), and [LAION-Logos](https://huggingface.co/datasets/ChristophSchuhmann/aesthetic-logo-ratings). 
 
 Link to the AVA training data ( already prepared) :
 https://drive.google.com/drive/folders/186XiniJup5Rt9FXsHiAGWhgWz-nmCK_r?usp=sharing
